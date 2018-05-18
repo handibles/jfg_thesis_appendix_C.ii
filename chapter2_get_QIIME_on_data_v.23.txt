@@ -1,0 +1,125 @@
+
+# I N T R O
+
+## Check your starting directory! (type 'pwd', or check the location at the type cursor) 
+#
+## workflow assumes that you, your mapfile (mapfile.txt) and your starting sequences are in the same fictional directory: '/home/qiimer/sandbox/'
+## Workflow assumes you downloaded your reference SILVA database (or GG if you use that =/ ) into '/home/qiimer/Downloads/' 
+## Make sure you change these to YOUR directories & databases - e.g. use Ctrl-H to search&replace with your locations.
+# 
+## all outputs will be placed in your current ('pwd') directory, in appropriate folders where possible.
+#
+## Additionally, script will use outputs as inputs later: if you change / rename / move an output, make sure you update 
+## the rest of the script! (use Ctrl-F, or Ctrl-H to search&replace)
+
+
+# S O U R C E 
+
+## Script based on the defaults of the QIIME 454 tutorial:: http://qiime.org/tutorials/tutorial.html
+# 
+## At least as good is the Werner Lab tutorial: http://www.wernerlab.org/teaching/qiime/overview
+
+
+echo 'Check mapping file is okay - see .html file in output'
+validate_mapping_file.py -m mapfile.txt -o mapping_output -v
+
+
+
+## N O T E: Acacia (Bragg, 2012) used to pre-process/'clean up' sequences - 
+## As such: .qual filtering performed at the acacia stage - .qual file not necessary here.
+## Individual workflows will differ. 	
+## --!! Dummy acacia location provided below !!--
+
+echo 'Assign reads to the different sample libraries, as defined in mapfile.txt'
+split_libraries.py -m mapfile.txt -f /path/to/acacia/output/acacia_output.seqOut -M 8 -b 10 -z truncate_only -o split_library_output
+
+echo 'Check formatting of split libraries'
+validate_demultiplexed_fasta.py -i split_library_output/seqs.fna -m mapfile.txt -o split_library_output 
+
+
+# C H I M E R A   F I L T E R I N G 
+
+echo 'Filter out chimeras, and then pick representative OTUs'
+identify_chimeric_seqs.py -i '/home/qiimer/sandbox/split_library_output/seqs.fna' -m usearch61 -r '/home/qiimer/Downloads/Silva_111_post/rep_set/97_Silva_111_rep_set.fasta' -o usearch_checked_chimeras/
+
+filter_fasta.py -f '/home/qiimer/sandbox/split_library_output/seqs.fna' -s usearch_checked_chimeras/chimeras.txt -n  -o '/home/qiimer/sandbox/usearch_checked_chimeras/seqs_chimeras_filtered.fna'
+
+pick_otus.py -m usearch61 -i usearch_checked_chimeras/seqs_chimeras_filtered.fna -o otus 
+
+pick_rep_set.py -i otus/seqs_chimeras_filtered_otus.txt -f usearch_checked_chimeras/seqs_chimeras_filtered.fna -o otus/seqs.fna_rep_set.fasta
+
+# using the original rep set which includes chimeras makes little to no difference to the eventual file: same # of sequences. 
+# pick_rep_set.py -i otus/seqs_chimeras_filtered_otus.txt -f split_library_output/seqs.fna -o otus/SPURIOUS_seqs.fna_rep_set.fasta
+
+
+
+# A L I G N ,   F I L T E R   A N D   .T R E 
+
+echo 'Align rep OTU sequences, filter out the spaces, and make a phylotree'
+align_seqs.py -i otus/seqs.fna_rep_set.fasta -t '/home/qiimer/Downloads/Silva_111_post/rep_set_aligned/97_Silva_111_rep_set.fasta'  -o pynast_aligned 
+
+# can use -s to ignore lanemask - better set -e to 0.0005, to stop zero entropy of gaps fooling QIIME into dumping bases (comparatively high entropy) 
+filter_alignment.py -i '/home/qiimer/sandbox/pynast_aligned/seqs.fna_rep_set_aligned.fasta'  -o pynast_aligned/ -e 0.0005
+make_phylogeny.py -i '/home/qiimer/sandbox/pynast_aligned/seqs.fna_rep_set_aligned_pfiltered.fasta'  -o otus/rep_OTU_seqs.tre
+
+
+# A S S I G N   T A X O N O M Y,   M A K E   .B I O M    A N D   C O R E
+
+echo 'Assign Taxonomy to rep OTUs, tabulate and summarise'
+assign_taxonomy.py -i '/home/qiimer/sandbox/otus/seqs.fna_rep_set.fasta' -r '/home/qiimer/Downloads/Silva_111_post/rep_set/97_Silva_111_rep_set.fasta' -t '/home/qiimer/Downloads/Silva_111_post/taxonomy/97_Silva_111_taxa_map_RDP_6_levels.txt' -o assigned_taxonomy 
+
+make_otu_table.py -i otus/seqs_chimeras_filtered_otus.txt -e usearch_checked_chimeras/chimeras.txt -t '/home/qiimer/sandbox/assigned_taxonomy/seqs.fna_rep_set_tax_assignments.txt' -o otus/otu_table.biom
+biom summarize-table -i otus/otu_table.biom -o otus/otu_table_summary.txt
+
+echo 'Calculate the OTUs with (e.g.) 100% incidence across sample (Core OTUs)'
+#take OTU table, and computer the core for all samples:
+compute_core_microbiome.py -i otus/otu_table.biom --max_fraction_for_core 1.0 --min_fraction_for_core 0.5 -o otus/core_otus_all
+biom summarize-table -i otus/core_otus_all/core_table_100.biom -o otus/100_core_otu_table_summary.txt
+
+
+# V I S U A L S
+
+echo 'Analytics: Visual metrics (Taxa, Emperor plots) and Alpha/Beta Diversity & Jacknifiing'
+make_otu_heatmap_html.py -i otus/otu_table.biom -m mapfile.txt -o OTU_Heatmap/ &&
+
+make_otu_network.py -m mapfile.txt -i otus/otu_table.biom -o otus/OTU_Network &&
+
+summarize_taxa_through_plots.py -i otus/otu_table.biom -o wf_taxa_summary -m mapfile.txt -s &&
+
+
+
+# D I V E R S I T Y   A N D   E X P L O R A T O R Y
+
+echo "alpha_diversity:metrics shannon,PD_whole_tree,chao1,observed_species" > alpha_params.txt &&
+
+alpha_rarefaction.py -i otus/otu_table.biom -m mapfile.txt -o wf_arare/ -p alpha_params.txt -t otus/rep_OTU_seqs.tre &&
+
+beta_diversity_through_plots.py -i otus/otu_table.biom -m mapfile.txt -o wf_bdiv_even146/ -t otus/rep_OTU_seqs.tre -e 146 &&
+
+#  -e is the depth of rarefaction: 750 is the lowest number of OTUs in our samples
+jackknifed_beta_diversity.py -i otus/otu_table.biom -t otus/rep_OTU_seqs.tre -m mapfile.txt -o wf_jack -e 750 &&
+
+make_bootstrapped_tree.py -m wf_jack/unweighted_unifrac/upgma_cmp/master_tree.tre -s wf_jack/unweighted_unifrac/upgma_cmp/jackknife_support.txt -o wf_jack/unweighted_unifrac/upgma_cmp/jackknife_named_nodes.pdf &&
+
+make_emperor.py -i wf_bdiv_even146/unweighted_unifrac_pc.txt -m mapfile.txt -t wf_taxa_summary/otu_table_sorted_L3.txt -o emperor_3D
+
+
+
+## This section is a little harier and may be best avoided::
+
+# A N D   T H E N   S O M E   M O R E   P O S T - H O C
+
+# compute and compare the core alpha diversity  :: WARNING - home-brewed statistic
+compute_core_microbiome.py -i otus/otu_table.biom -o otus/core_microbiome
+
+#compares the a_div between the reactors, to a sample depth of 4492
+compare_alpha_diversity.py -i '/home/qiimer/sandbox/wf_arare/alpha_div_collated/shannon.txt' -c Reactor -m '/home/qiimer/mapfile.txt' -o '/home/qiimer/sandbox/wf_arare_compare' -d 4492
+
+# compare the reactor makeup:
+summarize_taxa_through_plots.py -i otus/otu_table.biom -o wf_taxa_summary_compreactor -m mapfile.txt -s -c Reactor &&
+summarize_taxa.py -i '/home/qiimer/sandbox/wf_taxa_summary_compreator/Reactor_otu_table_sorted_L6.biom' -a &&
+compare_taxa_summaries.py -i '/home/qiimer/sandbox/18.1/18.1_Summ/otu_table_L6.txt','/home/qiimer/sandbox/18.6/18.6_Summ/otu_table_L6.txt' -m paired -o Comp_Tax_1_6 -c spearman -s '/home/qiimer/sandbox/jf_tax_comp_1_6.txt'
+
+
+echo 'Script finished successfully! Enjoy '
+# jfg 9.9.15
